@@ -1,0 +1,134 @@
+import { FormEvent, useEffect, useState } from 'react';
+import { api, ConfigEmpresa, LocalEmpresa } from '../comun/api';
+import { LogoListo, prepararLogo } from '../comun/imagen';
+
+type Nivel = 'A' | 'E' | 'V';
+type Pestana = 'datos' | 'impresion';
+const PESTANAS: [Pestana, string][] = [['datos', 'Datos de la empresa'], ['impresion', 'Impresión']];
+
+/** Configuración de la empresa: sus datos (salen en los PDF y tickets), los parámetros de impresión y las series de cada local. */
+export default function Empresa({ nivel }: { nivel: Nivel }) {
+  const puedeEditar = nivel === 'A';
+  const [pestana, setPestana] = useState<Pestana>('datos');
+  const [cfg, setCfg] = useState<ConfigEmpresa | null>(null);
+  const [mensaje, setMensaje] = useState('');
+  const [error, setError] = useState('');
+  useEffect(() => {
+    api.empresa().then(setCfg).catch((e) => setError((e as Error).message));
+  }, []);
+  const hecho = (c: ConfigEmpresa, m: string) => { setCfg(c); setError(''); setMensaje(m); };
+  const fallo = (e: unknown) => { setMensaje(''); setError((e as Error).message); };
+
+  return (
+    <div className="panel ancho">
+      <h1>Empresa y parámetros</h1>
+      <div className="pestanas" role="tablist">
+        {PESTANAS.map(([id, nombre]) => (
+          <button key={id} type="button" role="tab" aria-selected={pestana === id} className={pestana === id ? 'on' : ''} onClick={() => { setPestana(id); setMensaje(''); setError(''); }}>{nombre}</button>
+        ))}
+      </div>
+      {mensaje && <p className="ok" role="status">{mensaje}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
+      {cfg && pestana === 'datos' && <Datos cfg={cfg} puedeEditar={puedeEditar} alGuardar={hecho} alFallar={fallo} />}
+      {cfg && pestana === 'impresion' && <Impresion cfg={cfg} puedeEditar={puedeEditar} alGuardar={hecho} alFallar={fallo} />}
+    </div>
+  );
+}
+
+interface Parte { cfg: ConfigEmpresa; puedeEditar: boolean; alGuardar: (c: ConfigEmpresa, m: string) => void; alFallar: (e: unknown) => void }
+
+function Datos({ cfg, puedeEditar, alGuardar, alFallar }: Parte) {
+  const [d, setD] = useState({ nombre: cfg.nombre, razonSocial: cfg.razonSocial ?? '', ruc: cfg.ruc ?? '', direccion: cfg.direccion ?? '', telefono: cfg.telefono ?? '', correo: cfg.correo ?? '', lema: cfg.lema ?? '' });
+  const poner = (k: keyof typeof d, v: string) => setD((x) => ({ ...x, [k]: v }));
+  const enviar = async (e: FormEvent) => { e.preventDefault(); try { alGuardar(await api.editarEmpresa(d), 'Datos de la empresa guardados.'); } catch (x) { alFallar(x); } };
+  // Vista previa antes de subir: el archivo se convierte a PNG y, si tiene fondo liso, se le quita.
+  const [previo, setPrevio] = useState<{ archivo: File; listo: LogoListo; sinFondo: boolean } | null>(null);
+  async function elegirLogo(f: File) {
+    try { setPrevio({ archivo: f, listo: await prepararLogo(f, true), sinFondo: true }); } catch (x) { alFallar(x); }
+  }
+  async function cambiarFondo(sinFondo: boolean) {
+    if (!previo) return;
+    try { setPrevio({ ...previo, sinFondo, listo: await prepararLogo(previo.archivo, sinFondo) }); } catch (x) { alFallar(x); }
+  }
+  async function subirLogo() {
+    if (!previo) return;
+    try {
+      alGuardar(await api.editarEmpresa({ logo: { ...previo.listo.jpeg, png: previo.listo.png } }), 'Logo guardado.');
+      setPrevio(null);
+      window.dispatchEvent(new Event('empresa-cambio'));
+    } catch (x) { alFallar(x); }
+  }
+  async function quitarLogo() {
+    try { alGuardar(await api.editarEmpresa({ logo: null }), 'Logo quitado.'); window.dispatchEvent(new Event('empresa-cambio')); } catch (x) { alFallar(x); }
+  }
+  const campo = (k: keyof typeof d, etiqueta: string, extra: Record<string, unknown> = {}) => (
+    <div className="campo"><label htmlFor={`e-${k}`}>{etiqueta}</label><input id={`e-${k}`} value={d[k]} disabled={!puedeEditar} onChange={(e) => poner(k, e.target.value)} {...extra} /></div>
+  );
+  return (
+    <form className="form-config" onSubmit={enviar}>
+      <div className="dos-col">
+        {campo('nombre', 'Nombre comercial *', { required: true })}
+        {campo('razonSocial', 'Razón social')}
+        {campo('ruc', 'RUC', { inputMode: 'numeric', maxLength: 11 })}
+        {campo('telefono', 'Teléfono')}
+        {campo('correo', 'Correo', { type: 'email' })}
+        {campo('direccion', 'Dirección')}
+        <div className="campo ancha"><label htmlFor="e-lema">Lema de la cabecera</label><input id="e-lema" value={d.lema} disabled={!puedeEditar} onChange={(e) => poner('lema', e.target.value)} /></div>
+      </div>
+      <section className="bloque-nota logo-empresa"><h3>Logo de la empresa (horizontal)</h3>
+        {previo ? (
+          <>
+            <div className="vista-logo"><img alt="Vista previa del logo" src={previo.listo.vista} /></div>
+            <label className="check"><input type="checkbox" checked={previo.sinFondo} onChange={(e) => void cambiarFondo(e.target.checked)} /> Quitar el fondo{previo.sinFondo && !previo.listo.fondoQuitado ? ' (no se detectó un fondo liso)' : ''}</label>
+            <div className="fila"><button type="button" className="primario chico" onClick={() => void subirLogo()}>Guardar logo</button><button type="button" onClick={() => setPrevio(null)}>Cancelar</button></div>
+          </>
+        ) : (
+          <>
+            {cfg.logo ? <div className="vista-logo"><img className="logo-vista" alt="Logo de la empresa" src={cfg.logo.png ? `data:image/png;base64,${cfg.logo.png}` : `data:image/jpeg;base64,${cfg.logo.base64}`} /></div> : <p className="suave">Sin logo.</p>}
+            {puedeEditar && (
+              <div className="fila">
+                <label className="boton-archivo">Subir logo<input type="file" accept="image/*" aria-label="Subir logo" hidden onChange={async (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) await elegirLogo(f); }} /></label>
+                {cfg.logo && <button type="button" onClick={() => void quitarLogo()}>Quitar logo</button>}
+              </div>
+            )}
+          </>
+        )}
+      </section>
+      {puedeEditar && <div className="fila fin"><button type="submit" className="primario chico">Guardar</button></div>}
+    </form>
+  );
+}
+
+function Impresion({ cfg, puedeEditar, alGuardar, alFallar }: Parte) {
+  const [ancho, setAncho] = useState(String(cfg.anchoTicketMm ?? 80));
+  const [pie, setPie] = useState(cfg.pieTicket ?? '');
+  const [cuentas, setCuentas] = useState(cfg.cuentasBancarias ?? '');
+  const [terminos, setTerminos] = useState(cfg.terminosRecepcion ?? '');
+  const [aprob, setAprob] = useState(!!cfg.aprobacionPorItem);
+  const imp0 = cfg.impuestos ?? { igvPct: 18, igvReducidoPct: 10, detraccionPct: 12, detraccionDesde: 700 };
+  const [igv, setIgv] = useState(String(imp0.igvPct));
+  const [igvRed, setIgvRed] = useState(String(imp0.igvReducidoPct));
+  const [detrac, setDetrac] = useState(String(imp0.detraccionPct));
+  const [detracDesde, setDetracDesde] = useState(String(imp0.detraccionDesde));
+  const num = (t: string) => Number(t.replace(',', '.'));
+  const enviar = async (e: FormEvent) => {
+    e.preventDefault();
+    try { alGuardar(await api.editarEmpresa({ anchoTicketMm: Number(ancho), pieTicket: pie, cuentasBancarias: cuentas, terminosRecepcion: terminos, aprobacionPorItem: aprob, impuestos: { igvPct: num(igv), igvReducidoPct: num(igvRed), detraccionPct: num(detrac), detraccionDesde: num(detracDesde) } }), 'Parámetros de impresión guardados.'); } catch (x) { alFallar(x); }
+  };
+  return (
+    <form className="form-config" onSubmit={enviar}>
+      <div className="dos-col">
+        <div className="campo"><label htmlFor="i-ancho">Ancho del ticket (mm) *</label><input id="i-ancho" inputMode="numeric" value={ancho} disabled={!puedeEditar} onChange={(e) => setAncho(e.target.value.replace(/\D/g, ''))} required /></div>
+        <div className="campo check"><label><input type="checkbox" checked={aprob} disabled={!puedeEditar} onChange={(e) => setAprob(e.target.checked)} /> Aprobación por ítem en la orden de servicio</label></div>
+        <div className="campo"><label htmlFor="i-igv">IGV (%) *</label><input id="i-igv" inputMode="decimal" value={igv} disabled={!puedeEditar} onChange={(e) => setIgv(e.target.value.replace(/[^\d.,]/g, ''))} /></div>
+        <div className="campo"><label htmlFor="i-igv-red">IGV reducido en compras (%) *</label><input id="i-igv-red" inputMode="decimal" value={igvRed} disabled={!puedeEditar} onChange={(e) => setIgvRed(e.target.value.replace(/[^\d.,]/g, ''))} /></div>
+        <div className="campo"><label htmlFor="i-detrac">Detracción (%) *</label><input id="i-detrac" inputMode="decimal" value={detrac} disabled={!puedeEditar} onChange={(e) => setDetrac(e.target.value.replace(/[^\d.,]/g, ''))} /></div>
+        <div className="campo"><label htmlFor="i-detrac-desde">Detracción desde (S/) *</label><input id="i-detrac-desde" inputMode="decimal" value={detracDesde} disabled={!puedeEditar} onChange={(e) => setDetracDesde(e.target.value.replace(/[^\d.,]/g, ''))} /></div>
+        <div className="campo"><label htmlFor="i-pie">Pie del ticket</label><input id="i-pie" value={pie} disabled={!puedeEditar} onChange={(e) => setPie(e.target.value)} /></div>
+        <div className="campo ancha"><label htmlFor="i-cuentas">Cuentas bancarias del PDF de la orden</label><textarea id="i-cuentas" rows={2} value={cuentas} disabled={!puedeEditar} onChange={(e) => setCuentas(e.target.value)} /></div>
+        <div className="campo ancha"><label htmlFor="i-terminos">Términos y condiciones de la hoja de recepción</label><textarea id="i-terminos" rows={10} value={terminos} disabled={!puedeEditar} onChange={(e) => setTerminos(e.target.value)} /></div>
+      </div>
+      {puedeEditar && <div className="fila fin"><button type="submit" className="primario chico">Guardar</button></div>}
+    </form>
+  );
+}

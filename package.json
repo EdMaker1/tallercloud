@@ -1,0 +1,19 @@
+{
+  "name": "posventa-taller",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "db:dev": "pnpm --filter @posventa/database dev-db",
+    "db:migrate": "pnpm --filter @posventa/database migrate",
+    "db:deploy": "pnpm --filter @posventa/database run deploy",
+    "db:seed": "pnpm --filter @posventa/database seed",
+    "db:studio": "pnpm --filter @posventa/database studio",
+    "db:test-prep": "pnpm --filter @posventa/database test-prep",
+    "dev": "node herramientas/dev.mjs",
+    "test": "pnpm -r --if-present test"
+  }
+}

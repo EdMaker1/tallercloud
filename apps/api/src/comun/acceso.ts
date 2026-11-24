@@ -1,0 +1,82 @@
+import { createParamDecorator, ExecutionContext, SetMetadata } from '@nestjs/common';
+import { Prisma, PrismaClient } from '@prisma/client';
+
+export type Nivel = 'A' | 'E' | 'V';
+// V solo ver · E ver y editar · A ver, editar y acciones sensibles
+export const ORDEN: Record<string, number> = { V: 1, E: 2, A: 3 };
+
+export interface Sesion {
+  id: string;
+  nombre: string;
+  correo: string;
+  organizacionId: string | null;
+  localId: string | null;
+  roles: string[];
+  nivelMax: number;
+  esPlataforma: boolean;
+  permisos: Record<string, Nivel>;
+}
+
+/** Carga al usuario con sus roles y suma los permisos: gana el nivel más alto de cada módulo.
+ *  Para una empresa solo cuentan los módulos que tiene habilitados; el dueño de la plataforma no tiene empresa. */
+export async function cargarSesion(prisma: PrismaClient, id: string): Promise<Sesion | null> {
+  const u = await prisma.usuario.findUnique({
+    where: { id },
+    include: { roles: { include: { rol: { include: { permisos: { include: { permiso: true } } } } } } },
+  });
+  if (!u || !u.activo) return null;
+  const habilitados = u.organizacionId
+    ? new Set((await prisma.moduloHabilitado.findMany({ where: { organizacionId: u.organizacionId } })).map((m) => m.modulo))
+    : null;
+  const permisos: Record<string, Nivel> = {};
+  for (const ur of u.roles) {
+    for (const rp of ur.rol.permisos) {
+      const { modulo, accion } = rp.permiso;
+      if (habilitados && !habilitados.has(modulo)) continue;
+      if (!permisos[modulo] || ORDEN[accion] > ORDEN[permisos[modulo]]) permisos[modulo] = accion as Nivel;
+    }
+  }
+  return {
+    id: u.id,
+    nombre: u.nombre,
+    correo: u.correo,
+    organizacionId: u.organizacionId,
+    localId: u.localId,
+    roles: u.roles.map((r) => r.rol.nombre),
+    nivelMax: Math.max(0, ...u.roles.map((r) => r.rol.nivel)),
+    esPlataforma: u.roles.some((r) => r.rol.ambito === 'plataforma'),
+    permisos,
+  };
+}
+
+// Decoradores
+export const Publico = () => SetMetadata('publico', true);
+export const Requiere = (modulo: string, minimo: Nivel) => SetMetadata('requiere', { modulo, minimo });
+export const SesionActual = createParamDecorator((_: unknown, ctx: ExecutionContext) => ctx.switchToHttp().getRequest().sesion as Sesion);
+export const SesionReal = createParamDecorator((_: unknown, ctx: ExecutionContext) => ctx.switchToHttp().getRequest().real as Sesion);
+
+/** Nivel del Superadministrador (TI de la empresa): el más alto de una empresa. Puede gestionar roles de su mismo nivel (DEC-79). */
+export const NIVEL_SUPERADMINISTRADOR = 4;
+
+/** ¿Puede esta persona gestionar un rol (o a quien lo tiene) de ese nivel? Todos, solo de nivel inferior; el Superadministrador, también del suyo. */
+export const puedeGestionarNivel = (nivelRol: number, s: Sesion) => nivelRol < s.nivelMax || (s.nivelMax >= NIVEL_SUPERADMINISTRADOR && nivelRol <= s.nivelMax);
+
+/** ¿Quien actúa es el Desarrollador como él mismo (no «viendo como» otra persona)? Solo él puede cruzar empresas. */
+export const esPlataformaPropia = (s: Sesion, real: Sesion) => real.esPlataforma && s.id === real.id;
+
+/** Guarda quién hizo el cambio y, si actuaba «como» otra persona, también eso. */
+export async function auditar(
+  prisma: PrismaClient,
+  real: Sesion,
+  s: Sesion,
+  tabla: string,
+  registroId: string,
+  antes: unknown,
+  despues: unknown,
+  motivo?: string,
+) {
+  const json = (v: unknown) => (v == null ? undefined : (v as Prisma.InputJsonValue));
+  await prisma.auditoria.create({
+    data: { organizacionId: s.organizacionId, tabla, registroId, actor: real.id, actuandoComo: real.id !== s.id ? s.id : null, antes: json(antes), despues: json(despues), motivo },
+  });
+}

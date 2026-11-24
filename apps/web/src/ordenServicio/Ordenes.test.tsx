@@ -1,0 +1,443 @@
+// Pantalla Órdenes de servicio (slice S3; DEC-61, 71, 72, 73, 80). Se escribe primero.
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import App from '../App';
+
+type Peticion = { metodo: string; ruta: string; consulta: string; cuerpo: any };
+const llamadas: Peticion[] = [];
+let respuestas: Record<string, { status?: number; cuerpo: unknown }> = {};
+
+const orden = {
+  id: 'o1', codigo: '2026102800001', externa: false, estado: 'Recepcion', decision: 'Pendiente de aprobación', tipoAtencion: 'Mantenimiento preventivo',
+  fechaInicio: '2026-10-28T10:00:00.000Z', fechaCierre: null, km: 64000, observaciones: 'Ruido', recomendaciones: null,
+  cliente: { id: 'c1', nombre: 'JOAQUIN DEL CARPIO', documento: '73867734', tipoDocumento: 'DNI' },
+  vehiculo: { id: 'v1', placa: 'B5W-165', marca: 'SUZUKI', modelo: 'JIMMY', anio: 2012, color: 'PLOMO', nroSerie: null, nroVin: 'VIN1', nroMotor: null },
+  tecnico: null, jefeTaller: null, creadoPor: { id: 'u', nombre: 'Cajera Demo' },
+  detalles: [{ id: 'd1', tipo: 'producto', descripcion: 'Aceite 5W-30', referencia: 'AMO-102', cantidad: 1, costo: 10, rentabilidadPct: 20, precio: 12, descuentoPct: 0, impuesto: 'IGV', total: 12 }],
+  total: 12, abonos: [], totalAbonos: 0, pendiente: 12, comprobantes: [], conComprobante: false, ultimaBitacora: { texto: 'ODS creada', fecha: '2026-10-28T10:00:00.000Z', actor: 'Cajera Demo' }, bitacora: [],
+};
+const catalogos = { tiposAtencion: ['Mantenimiento preventivo', 'Garantía'], decisiones: ['Pendiente de aprobación', 'Aprobada para cotizar', 'Aprobada para comprar', 'No aprobada'], estados: [{ id: 'Recepcion', nombre: 'Recepción' }, { id: 'EnProceso', nombre: 'En proceso' }, { id: 'Entrega', nombre: 'Entrega' }, { id: 'Cerrada', nombre: 'Cerrado' }], metodosPago: ['Efectivo', 'Yape'], tecnicos: [{ id: 't1', nombre: 'Técnico Demo 1' }], jefes: [{ id: 'j1', nombre: 'Jefe de Taller Demo' }], logisticos: [{ id: 'l1', nombre: 'Logístico Demo' }], cajeras: [{ id: 'cj1', nombre: 'Cajera Uno' }] };
+
+const me = (nivel: 'A' | 'E' | 'V') => ({
+  usuario: { id: 'u', nombre: 'Cajera Demo', correo: 'cajera@demo.local', organizacionId: 'o' },
+  roles: ['Cajera'], permisos: { ods: nivel }, menu: [{ id: 'ods', label: 'Órdenes de servicio', grupo: 'General', nivel }],
+  actuandoComo: false, esPlataforma: false, real: { id: 'u', nombre: 'Cajera Demo' },
+});
+function simular(nivel: 'A' | 'E' | 'V' = 'E') {
+  llamadas.length = 0;
+  respuestas = {};
+  vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+    const metodo = (init?.method ?? 'GET').toUpperCase();
+    const u = new URL(url);
+    const cuerpo = typeof init?.body === 'string' ? JSON.parse(init.body) : init?.body;
+    llamadas.push({ metodo, ruta: u.pathname, consulta: u.search, cuerpo });
+    const r = respuestas[`${metodo} ${u.pathname}`];
+    if (r) return { ok: (r.status ?? 200) < 400, status: r.status ?? 200, json: async () => r.cuerpo };
+    const base: Record<string, unknown> = { 'GET /me': me(nivel), 'GET /ordenes/catalogos': catalogos, 'GET /ordenes': [orden], 'GET /ordenes/o1': orden, 'GET /clientes': [{ ...orden.cliente, activo: true }], 'GET /vehiculos': [{ ...orden.vehiculo, cliente: orden.cliente, kmActual: 64000 }] };
+    const clave = `${metodo} ${u.pathname}`;
+    if (clave in base) return { ok: true, status: 200, json: async () => base[clave] };
+    return { ok: true, status: 200, json: async () => orden };
+  }));
+}
+beforeEach(() => {
+  vi.stubEnv('VITE_DEMO_MODE', 'false');
+  sessionStorage.clear();
+  localStorage.clear();
+  sessionStorage.setItem('posventa-token', 't');
+  window.location.hash = '#/ods';
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
+
+it('Lista: tarjeta con consecutivo, «Sin comprobante», fechas, cliente, vehículo y botones de acción', async () => {
+  simular();
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  expect(within(t).getByText('Sin comprobante')).toBeInTheDocument();
+  expect(within(t).getByText(/Placa: B5W-165/)).toBeInTheDocument();
+  expect(within(t).getByText(/JOAQUIN DEL CARPIO/)).toBeInTheDocument();
+  for (const b of ['Facturar', 'Editar', 'Fechas de inicio y cierre', 'Estado de la orden', 'Bitácora', 'Registrar abono o pago', 'Imprimir', 'Eliminar']) expect(within(t).getByRole('button', { name: b })).toBeInTheDocument();
+  expect(screen.getByRole('tab', { name: /Cerrado/ })).toBeInTheDocument();
+});
+
+it('Lista: la búsqueda rápida y el estado se envían al servidor', async () => {
+  simular();
+  render(<App />);
+  await screen.findByText('#2026102800001');
+  await userEvent.click(screen.getByRole('tab', { name: /En proceso/ }));
+  await userEvent.type(screen.getByLabelText('Búsqueda rápida'), 'B5W');
+  await userEvent.click(screen.getByRole('button', { name: 'Filtrar' }));
+  await waitFor(() => expect(llamadas.some((l) => l.ruta === '/ordenes' && l.consulta.includes('estado=EnProceso') && l.consulta.includes('q=B5W'))).toBe(true));
+});
+
+it('Editar: una sola pantalla con «Datos del comprobante», ítems, solo el TOTAL y los abonos; sin «Nuevos ítems» ni subtotales', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Editar' }));
+  const d = await screen.findByRole('dialog');
+  expect(within(d).getByText('Datos del comprobante')).toBeInTheDocument();
+  expect(within(d).getByLabelText('Técnico')).toBeInTheDocument();
+  expect(within(d).queryByLabelText('Jefe de taller (opcional)')).not.toBeInTheDocument();
+  expect(within(d).getByDisplayValue('AMO-102')).toBeInTheDocument();
+  expect(within(d).getByText('TOTAL')).toBeInTheDocument();
+  expect(within(d).getByText('Abonos / pagos')).toBeInTheDocument();
+  expect(within(d).queryByText(/Nuevos ítems/i)).toBeNull();
+  expect(within(d).queryByText(/Base imponible|Subtotal/i)).toBeNull();
+  expect(within(d).queryByRole('tab')).toBeNull();
+  expect(within(d).queryByLabelText(/SOAT|Forma de pago|Requerimientos/i)).toBeNull();
+  // 28/10: sin columna Impuesto ni Color; con Responsable, evidencias y estado del vehículo; estado y decisión en la cabecera
+  expect(within(d).queryByRole('columnheader', { name: 'Impuesto' })).toBeNull();
+  expect(within(d).getByRole('columnheader', { name: 'Responsable' })).toBeInTheDocument();
+  expect(within(d).queryByText('Color')).toBeNull();
+  expect(within(d).getByText('Evidencias de ingreso')).toBeInTheDocument();
+  expect(within(d).getByRole('button', { name: /Estado del vehículo/ })).toBeInTheDocument();
+});
+
+it('Editar: «Datos del comprobante» se pliega y el estado del vehículo se guarda', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Editar' }));
+  const d = await screen.findByRole('dialog');
+  await userEvent.click(within(d).getByRole('button', { name: /Datos del comprobante/ }));
+  expect(within(d).queryByLabelText('Técnico')).toBeNull();
+  await userEvent.click(within(d).getByRole('button', { name: /Estado del vehículo/ }));
+  const e = await screen.findByRole('dialog', { name: 'Estado del vehículo' });
+  await userEvent.selectOptions(within(e).getByLabelText('Nivel de combustible'), '1/2');
+  await userEvent.click(within(e).getByLabelText('Rayado'));
+  await userEvent.click(within(e).getByRole('button', { name: 'Guardar' }));
+  await waitFor(() => expect(llamadas.some((l) => l.metodo === 'PATCH' && l.cuerpo?.estadoVehiculo?.combustible === '1/2' && l.cuerpo.estadoVehiculo.danos[0] === 'Rayado')).toBe(true));
+});
+
+it('Fechas: el botón está deshabilitado si no eres Superadministrador', async () => {
+  simular();
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  expect(within(t).getByRole('button', { name: 'Fechas de inicio y cierre' })).toBeDisabled();
+});
+
+it('Editar: «+ Agregar ítem» y «Guardar cambios» envían los ítems con su referencia', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Editar' }));
+  const d = await screen.findByRole('dialog');
+  await userEvent.click(within(d).getByRole('button', { name: '+ Agregar ítem' }));
+  const detalles = within(d).getAllByLabelText('Detalle');
+  await userEvent.type(detalles[1], 'Cambio de motor');
+  await userEvent.click(within(d).getByRole('button', { name: 'Guardar cambios' }));
+  await waitFor(() => expect(llamadas.some((l) => l.metodo === 'PUT' && l.ruta === '/ordenes/o1/detalles')).toBe(true));
+  const put = llamadas.find((l) => l.metodo === 'PUT')!.cuerpo.detalles;
+  expect(put).toHaveLength(2);
+  expect(put[0]).toMatchObject({ id: 'd1', referencia: 'AMO-102' });
+  expect(put[1]).toMatchObject({ descripcion: 'Cambio de motor' });
+});
+
+it('Editar: el ojo oculta costo, rentabilidad y referencia (vista del cliente)', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Editar' }));
+  const d = await screen.findByRole('dialog');
+  expect(within(d).getByRole('columnheader', { name: 'Costo' })).toBeInTheDocument();
+  await userEvent.click(within(d).getByRole('button', { name: /Vista del cliente/ }));
+  expect(within(d).queryByRole('columnheader', { name: 'Costo' })).toBeNull();
+  expect(within(d).queryByDisplayValue('AMO-102')).toBeNull();
+});
+
+it('Estado: si la orden no cuadra con su comprobante, muestra el aviso del servidor y no cierra', async () => {
+  simular();
+  respuestas['PATCH /ordenes/o1'] = { status: 409, cuerpo: { message: 'La orden no cuadra con el comprobante NV01-000002: el total de la orden es S/ 100.00 y el del comprobante S/ 120.00. Corrige uno de los dos antes de cerrar.' } };
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Estado de la orden' }));
+  await userEvent.click(await screen.findByRole('menuitem', { name: 'Cerrado' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('no cuadra con el comprobante NV01-000002');
+});
+
+it('Nueva orden: pide cliente, vehículo y tipo de atención y la crea', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(await screen.findByRole('button', { name: '+ Nuevo' }));
+  const d = await screen.findByRole('dialog');
+  await userEvent.selectOptions(within(d).getByLabelText('Cliente'), 'c1');
+  await userEvent.selectOptions(within(d).getByLabelText('Vehículo'), 'v1');
+  await userEvent.selectOptions(within(d).getByLabelText('Tipo de atención'), 'Garantía');
+  expect(within(d).getAllByLabelText('Detalle')).toHaveLength(1);
+  expect(within(d).getByText('Evidencias de ingreso')).toBeInTheDocument();
+  expect(within(d).getByText('Abonos / pagos')).toBeInTheDocument();
+  expect(within(d).getByLabelText(/cotización previa/)).toBeInTheDocument();
+  await userEvent.selectOptions(within(d).getByLabelText('Estado'), 'EnProceso');
+  // La «Decisión del cliente» ya no se elige en pantalla: queda en su valor por defecto salvo que la ODS se cierre sin nota de venta.
+  expect(within(d).queryByLabelText('Decisión del cliente')).not.toBeInTheDocument();
+  await userEvent.click(within(d).getByRole('button', { name: 'Crear orden' }));
+  await waitFor(() => expect(llamadas.some((l) => l.metodo === 'POST' && l.ruta === '/ordenes')).toBe(true));
+  expect(llamadas.find((l) => l.metodo === 'POST' && l.ruta === '/ordenes')!.cuerpo).toMatchObject({ vehiculoId: 'v1', tipoAtencion: 'Garantía', estado: 'EnProceso', decision: 'Pendiente de aprobación' });
+});
+
+it('Nueva orden: fotos de ingreso opcionales, como máximo 5, que se suben al crear la orden', async () => {
+  simular();
+  vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: () => 'blob:foto', revokeObjectURL: () => undefined }));
+  render(<App />);
+  await userEvent.click(await screen.findByRole('button', { name: '+ Nuevo' }));
+  const d = await screen.findByRole('dialog');
+  expect(within(d).getByRole('button', { name: /Cargar fotos/ })).toBeEnabled();
+  expect(within(d).getByRole('button', { name: /Tomar foto/ })).toBeEnabled();
+  expect(within(d).queryByText(/video/i)).toBeNull();
+  const fotos = Array.from({ length: 6 }, (_, i) => new File(['x'], `f${i}.jpg`, { type: 'image/jpeg' }));
+  await userEvent.upload(within(d).getByLabelText('Cargar fotos'), fotos);
+  expect(await within(d).findByText('Máximo 5 fotos por orden.')).toBeInTheDocument();
+  expect(within(d).getAllByRole('button', { name: /^Quitar f\d\.jpg$/ })).toHaveLength(5);
+  expect(within(d).getByRole('button', { name: /Cargar fotos/ })).toBeDisabled();
+  await userEvent.selectOptions(within(d).getByLabelText('Vehículo'), 'v1');
+  await userEvent.click(within(d).getByRole('button', { name: 'Crear orden' }));
+  await waitFor(() => expect(llamadas.filter((l) => l.metodo === 'POST' && l.ruta === '/ordenes/o1/evidencias')).toHaveLength(5));
+});
+
+it('Editar: el responsable de un producto es una cajera o un logístico y el de un servicio, un técnico o el jefe', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Editar' }));
+  const d = await screen.findByRole('dialog');
+  const opciones = () => [...(within(d).getAllByLabelText('Responsable')[0] as HTMLSelectElement).options].map((o) => o.text);
+  expect(opciones()).toEqual(['—', 'Cajera Uno', 'Logístico Demo']);
+  await userEvent.selectOptions(within(d).getAllByLabelText('Tipo')[0], 'servicio');
+  expect(opciones()).toEqual(['—', 'Técnico Demo 1']);
+});
+
+it('Nueva orden: el servicio toma por defecto el técnico de la ODS y el producto, la cajera', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(await screen.findByRole('button', { name: '+ Nuevo' }));
+  const d = await screen.findByRole('dialog');
+  await userEvent.selectOptions(within(d).getByLabelText('Técnico'), 't1');
+  const resp = () => within(d).getAllByLabelText('Responsable').map((s) => (s as HTMLSelectElement).value);
+  expect(resp()).toEqual(['t1']);
+  await userEvent.click(within(d).getByRole('button', { name: '+ Agregar ítem' }));
+  expect(resp()).toEqual(['t1', 't1']);
+  await userEvent.selectOptions(within(d).getAllByLabelText('Tipo')[1], 'producto');
+  expect(resp()).toEqual(['t1', 'cj1']);
+});
+
+it('Editar: el precio con coma decimal («12,50») se entiende y lo que no es número se ignora', async () => {
+  simular();
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Editar' }));
+  const d = await screen.findByRole('dialog');
+  const precio = within(d).getByLabelText('Precio unitario');
+  await userEvent.clear(precio);
+  await userEvent.type(precio, '12,5');
+  await userEvent.tab();
+  expect(within(d).getByText('TOTAL').parentElement).toHaveTextContent('S/ 12.50');
+  await userEvent.type(within(d).getByLabelText('Precio unitario'), 'x');
+  await userEvent.tab();
+  expect(within(d).getByText('TOTAL').parentElement).toHaveTextContent('S/ 12.50');
+});
+
+it('Pagos recibidos: método, valor recibido y concepto uno bajo otro, historia plegable y botones Salir y Guardar', async () => {
+  simular();
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  await userEvent.click(within(t).getByRole('button', { name: 'Registrar abono o pago' }));
+  const d = screen.getByRole('dialog', { name: 'Pagos recibidos' });
+  expect(within(d).getByLabelText('Método')).toBeInTheDocument();
+  expect(within(d).getByLabelText('Concepto de pago')).toBeInTheDocument();
+  expect(within(d).getByText('No hay pagos registrados.')).toBeInTheDocument();
+  await userEvent.click(within(d).getByRole('button', { name: /Historia de pagos/ }));
+  expect(within(d).queryByText('No hay pagos registrados.')).toBeNull();
+  await userEvent.type(within(d).getByLabelText('Valor recibido'), '5,50');
+  await userEvent.click(within(d).getByRole('button', { name: 'Guardar' }));
+  await waitFor(() => expect(llamadas.some((l) => l.metodo === 'POST' && l.ruta === '/ordenes/o1/abonos')).toBe(true));
+  expect(llamadas.find((l) => l.ruta === '/ordenes/o1/abonos')!.cuerpo).toMatchObject({ concepto: 'Abono', valor: 5.5 });
+});
+
+it('Pagos recibidos: «Salir» cierra el modal sin guardar nada', async () => {
+  simular();
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  await userEvent.click(within(t).getByRole('button', { name: 'Registrar abono o pago' }));
+  await userEvent.click(within(screen.getByRole('dialog', { name: 'Pagos recibidos' })).getByRole('button', { name: 'Salir' }));
+  expect(screen.queryByRole('dialog', { name: 'Pagos recibidos' })).toBeNull();
+  expect(llamadas.some((l) => l.metodo === 'POST')).toBe(false);
+});
+
+it('Imprimir: PDF, Recepción y Ticket abren su vista previa en un modal con el visor del navegador', async () => {
+  const creados: Blob[] = [];
+  const revocados: string[] = [];
+  URL.createObjectURL = (b: Blob | MediaSource) => { creados.push(b as Blob); return `blob:vista-${creados.length}`; };
+  URL.revokeObjectURL = (u: string) => { revocados.push(u); };
+  simular();
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  for (const [formato, titulo] of [['PDF', 'Orden de servicio 2026102800001'], ['Recepción', 'Recepción 2026102800001'], ['Ticket', 'Ticket 2026102800001']] as const) {
+    await userEvent.click(within(t).getByRole('button', { name: 'Imprimir' }));
+    await userEvent.click(within(t).getByRole('menuitem', { name: formato }));
+    const d = screen.getByRole('dialog', { name: titulo });
+    expect(within(d).getByTitle(`Vista previa: ${titulo}`)).toHaveAttribute('src', `blob:vista-${creados.length}`);
+    expect(creados[creados.length - 1].type).toBe('application/pdf');
+    await userEvent.click(within(d).getAllByRole('button', { name: 'Cerrar' }).at(-1)!);
+    expect(screen.queryByRole('dialog', { name: titulo })).toBeNull();
+  }
+  expect(revocados).toEqual(['blob:vista-1', 'blob:vista-2', 'blob:vista-3']);
+});
+
+// ───────── RF-018: corregir o reabrir una ODS cerrada ─────────
+const cerrada = { ...orden, estado: 'Cerrada', decision: 'No aprobada', fechaCierre: '2026-10-29T10:00:00.000Z', solicitudes: [] };
+const pendiente = { id: 's1', tipo: 'REAPERTURA', motivo: 'Faltó un trabajo', estadoDestino: 'EnProceso', cambios: null, estado: 'PENDIENTE', solicitadaPor: 'Cajera Demo', resueltaPor: null, respuesta: null, fecha: '2026-10-30T10:00:00.000Z', resuelta: null };
+
+it('ODS cerrada: el botón de estado abre la solicitud; la reapertura envía el motivo y el estado al que vuelve', async () => {
+  simular();
+  respuestas['GET /ordenes'] = { cuerpo: [cerrada] };
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  await userEvent.click(within(t).getByRole('button', { name: 'Estado de la orden' }));
+  const d = screen.getByRole('dialog', { name: /Solicitar corrección o reapertura/ });
+  await userEvent.selectOptions(within(d).getByLabelText('Vuelve al estado *'), 'Entrega');
+  await userEvent.type(within(d).getByLabelText('Motivo *'), 'Faltó un trabajo');
+  await userEvent.click(within(d).getByRole('button', { name: 'Enviar solicitud' }));
+  await waitFor(() => expect(llamadas.find((l) => l.metodo === 'POST' && l.ruta === '/ordenes/o1/solicitudes')?.cuerpo).toEqual({ tipo: 'REAPERTURA', motivo: 'Faltó un trabajo', estadoDestino: 'Entrega' }));
+});
+
+it('ODS cerrada: la corrección envía solo los datos que cambiaron', async () => {
+  simular();
+  respuestas['GET /ordenes'] = { cuerpo: [cerrada] };
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  await userEvent.click(within(t).getByRole('button', { name: 'Estado de la orden' }));
+  const d = screen.getByRole('dialog', { name: /Solicitar corrección o reapertura/ });
+  await userEvent.selectOptions(within(d).getByLabelText('Tipo de solicitud *'), 'CORRECCION');
+  await userEvent.clear(within(d).getByLabelText('Kilometraje'));
+  await userEvent.type(within(d).getByLabelText('Kilometraje'), '65000');
+  await userEvent.type(within(d).getByLabelText('Motivo *'), 'Mal digitado');
+  await userEvent.click(within(d).getByRole('button', { name: 'Enviar solicitud' }));
+  await waitFor(() => expect(llamadas.find((l) => l.ruta === '/ordenes/o1/solicitudes')?.cuerpo).toEqual({ tipo: 'CORRECCION', motivo: 'Mal digitado', cambios: { km: 65000 } }));
+});
+
+it('Solicitud pendiente: la Cajera la ve sin botones; el Jefe de taller la autoriza', async () => {
+  simular();
+  respuestas['GET /ordenes'] = { cuerpo: [{ ...cerrada, solicitudes: [pendiente] }] };
+  render(<App />);
+  const nota = await screen.findByRole('note');
+  expect(nota).toHaveTextContent('Reapertura solicitada (a En proceso): Faltó un trabajo · Cajera Demo');
+  expect(within(nota).queryByRole('button', { name: 'Autorizar' })).toBeNull();
+  cleanup();
+  simular();
+  respuestas['GET /ordenes'] = { cuerpo: [{ ...cerrada, solicitudes: [pendiente] }] };
+  respuestas['GET /me'] = { cuerpo: { ...me('E'), roles: ['Jefe de taller'] } };
+  render(<App />);
+  await userEvent.click(within(await screen.findByRole('note')).getByRole('button', { name: 'Autorizar' }));
+  await waitFor(() => expect(llamadas.find((l) => l.ruta === '/ordenes/o1/solicitudes/s1/resolver')?.cuerpo).toEqual({ aprobar: true, respuesta: '' }));
+});
+
+// ───────── RF-088: nota de venta ─────────
+const catNota = { ...catalogos, locales: [{ id: 'l1', nombre: 'Local Prohogar', serieNotaVenta: 'NV01' }, { id: 'l2', nombre: 'Local Sin Serie', serieNotaVenta: null }], localId: 'l1' };
+const ordenServicio800 = { ...orden, detalles: [{ id: 'd1', tipo: 'servicio', descripcion: 'Cambio de motor', referencia: null, cantidad: 1, costo: null, rentabilidadPct: null, precio: 800, descuentoPct: 0, impuesto: 'IGV', total: 800 }, { id: 'd2', tipo: 'producto', descripcion: 'Aceite 5W-30', referencia: 'AMO-102', cantidad: 1, costo: 10, rentabilidadPct: 20, precio: 100, descuentoPct: 0, impuesto: 'IGV', total: 100 }], total: 900, pendiente: 900 };
+const notaVigente = { id: 'n1', codigo: 'NV01-000007', condicion: 'CONTADO', fechaEmision: '2026-11-16T15:00:00.000Z', fechaVencimiento: null, local: 'Local Prohogar', observaciones: null, comentario: null, detalles: [{ id: 'x1', tipo: 'servicio', descripcion: 'Cambio de motor', referencia: null, cantidad: 1, precio: 800, descuentoPct: 0, tipoIgv: 'GRAVADO', total: 800 }], exonerada: 0, inafecta: 0, gravada: 677.97, igv: 122.03, total: 800, conDetraccion: true, detraccionPct: 12, detraccion: 96 };
+
+const extra = { 'GET /cotizaciones': { cuerpo: [] }, 'GET /clientes': { cuerpo: [] }, 'GET /vehiculos': { cuerpo: [] }, 'GET /catalogo-ods': { cuerpo: { servicios: [], productos: [] } } };
+it('Facturar: abre «Emitir nuevo comprobante» con la orden y sus ítems ya cargados, totales, detracción y tipo de IGV por ítem; «Emitir» envía la nota', async () => {
+  simular();
+  Object.assign(respuestas, extra);
+  respuestas['GET /ordenes/catalogos'] = { cuerpo: catNota };
+  respuestas['GET /ordenes'] = { cuerpo: [ordenServicio800] };
+  respuestas['POST /notas-venta'] = { status: 201, cuerpo: { codigo: 'NV01-000008' } };
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  await userEvent.click(within(t).getByRole('button', { name: 'Facturar' }));
+  const d = screen.getByRole('dialog', { name: /Emitir nuevo comprobante/ });
+  expect(within(d).getByLabelText('Cargar ítems desde una orden de servicio')).toHaveValue('o1');
+  expect(within(d).getByLabelText('Detalle del ítem 1')).toHaveValue('Cambio de motor');
+  expect(within(d).getByLabelText('Detalle del ítem 2')).toHaveValue('Aceite 5W-30');
+  const totales = within(d).getByLabelText('Totales');
+  expect(totales).toHaveTextContent('Gravada S/ 762.71');
+  expect(totales).toHaveTextContent('IGV (18 %) S/ 137.29');
+  expect(totales).toHaveTextContent('Total S/ 900.00');
+  expect(totales).toHaveTextContent('Detracción S/ 108.00');
+  expect(within(d).getByRole('checkbox')).toBeChecked();
+  const opciones = within(d).getByLabelText('Tipo de IGV del ítem 2').querySelectorAll('option');
+  expect([...opciones].map((o) => o.value)).toEqual(['GRAVADO', 'NO_APLICA']);
+  await userEvent.selectOptions(within(d).getByLabelText('Tipo de IGV del ítem 2'), 'NO_APLICA');
+  expect(totales).toHaveTextContent('No aplica S/ 100.00');
+  await userEvent.click(within(d).getByRole('button', { name: 'Emitir' }));
+  await waitFor(() => expect(llamadas.find((l) => l.ruta === '/notas-venta' && l.metodo === 'POST')?.cuerpo).toMatchObject({ ordenId: 'o1', condicion: 'CONTADO', conDetraccion: true, items: [{ descripcion: 'Cambio de motor', precio: 800, tipoIgv: 'GRAVADO' }, { descripcion: 'Aceite 5W-30', precio: 100, tipoIgv: 'NO_APLICA' }] }));
+  expect(await screen.findByRole('status')).toHaveTextContent('Nota de venta NV01-000008 emitida.');
+});
+
+it('Facturar: a crédito pide vencimiento y un local sin serie o sin local no deja emitir', async () => {
+  simular();
+  Object.assign(respuestas, extra);
+  respuestas['GET /ordenes/catalogos'] = { cuerpo: { ...catNota, localId: 'l2' } };
+  respuestas['GET /ordenes'] = { cuerpo: [ordenServicio800] };
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  await userEvent.click(within(t).getByRole('button', { name: 'Facturar' }));
+  const d = screen.getByRole('dialog', { name: /Emitir nuevo comprobante/ });
+  // El vencimiento se puede elegir siempre y por defecto es hoy; solo a crédito es obligatorio.
+  expect(within(d).getByLabelText('Fecha de vencimiento')).toBeEnabled();
+  expect(within(d).getByLabelText('Fecha de vencimiento')).toHaveValue(new Date().toLocaleDateString('en-CA'));
+  await userEvent.click(within(d).getByLabelText('Crédito'));
+  expect(within(d).getByLabelText('Fecha de vencimiento *')).toBeRequired();
+  expect(within(d).getByRole('button', { name: 'Emitir' })).toBeDisabled();
+  expect(within(d).getByRole('alert')).toHaveTextContent('no tiene serie de nota de venta');
+  cleanup();
+  simular();
+  Object.assign(respuestas, extra);
+  respuestas['GET /ordenes/catalogos'] = { cuerpo: { ...catNota, localId: null } };
+  respuestas['GET /ordenes'] = { cuerpo: [ordenServicio800] };
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Facturar' }));
+  expect(within(screen.getByRole('dialog', { name: /Emitir nuevo comprobante/ })).getByRole('alert')).toHaveTextContent('no tiene un local asignado');
+});
+
+it('Orden con nota: «Facturar» la muestra bloqueada, con PDF, Ticket y Anular solo con nivel «todo»', async () => {
+  const creados: Blob[] = [];
+  URL.createObjectURL = (b: Blob | MediaSource) => { creados.push(b as Blob); return 'blob:nota'; };
+  URL.revokeObjectURL = () => undefined;
+  simular();
+  respuestas['GET /ordenes/catalogos'] = { cuerpo: catNota };
+  respuestas['GET /ordenes'] = { cuerpo: [{ ...ordenServicio800, conComprobante: true, comprobantes: ['NV01-000007'], notaVenta: notaVigente }] };
+  render(<App />);
+  const t = (await screen.findByText('#2026102800001')).closest('article')!;
+  expect(within(t).getByText('Con comprobante')).toBeInTheDocument();
+  await userEvent.click(within(t).getByRole('button', { name: 'Facturar' }));
+  const d = screen.getByRole('dialog', { name: 'Nota de venta NV01-000007' });
+  expect(within(d).getByLabelText('Crédito')).toBeDisabled();
+  expect(within(d).getByLabelText('Serie')).toHaveValue('NV01');
+  expect(within(d).queryByRole('button', { name: 'Emitir' })).toBeNull();
+  expect(within(d).queryByRole('button', { name: 'Anular' })).toBeNull();
+  await userEvent.click(within(d).getByRole('button', { name: 'PDF' }));
+  const vista = await screen.findByRole('dialog', { name: 'Nota de venta NV01-000007' });
+  expect(within(vista).getByTitle('Vista previa: Nota de venta NV01-000007')).toHaveAttribute('src', 'blob:nota');
+  expect(creados[0].type).toBe('application/pdf');
+});
+
+it('Garantía: al elegir el tipo se abre un modal con la orden de origen y su detalle; se eligen servicios, se ve el cuadro en la cabecera y se envía el enlace con los montos en cero', async () => {
+  simular();
+  const origen = { ...orden, id: 'o9', codigo: '2026101000009', tipoAtencion: 'Mantenimiento correctivo', estado: 'Cerrada', detalles: [{ ...orden.detalles[0], id: 'sv1', tipo: 'servicio', descripcion: 'Cambio de embrague', referencia: 'EMB-1', precio: 300, total: 300, tecnicoId: null }, { ...orden.detalles[0], id: 'pr1', tipo: 'producto', descripcion: 'Aceite' }], total: 312 };
+  respuestas['GET /ordenes'] = { cuerpo: [orden, origen] };
+  respuestas['PATCH /ordenes/o1'] = { cuerpo: { ...orden, tipoAtencion: 'Garantía' } };
+  render(<App />);
+  await userEvent.click(within((await screen.findByText('#2026102800001')).closest('article')!).getByRole('button', { name: 'Editar' }));
+  const d = await screen.findByRole('dialog', { name: /Editar orden/ });
+  expect(screen.queryByRole('dialog', { name: 'Orden de origen de la garantía' })).toBeNull();
+  await userEvent.selectOptions(within(d).getByLabelText('Tipo de atención'), 'Garantía');
+  const m = await screen.findByRole('dialog', { name: 'Orden de origen de la garantía' });
+  await waitFor(() => expect(within(m).getByRole('option', { name: /2026101000009/ })).toBeInTheDocument());
+  expect(within(m).getByRole('button', { name: 'Aceptar' })).toBeDisabled();
+  await userEvent.selectOptions(within(m).getByLabelText('Orden de servicio'), 'o9');
+  const detalle = within(m).getByRole('group', { name: 'Detalle de la orden de origen' });
+  expect(within(detalle).getByText('EMB-1')).toBeInTheDocument();
+  expect(within(detalle).getByText('Aceite')).toBeInTheDocument();
+  expect(within(detalle).queryByLabelText('Elegir Aceite')).toBeNull();
+  await userEvent.click(within(detalle).getByLabelText('Elegir Cambio de embrague'));
+  await userEvent.click(within(m).getByRole('button', { name: 'Aceptar' }));
+  const cuadro = within(d).getByRole('group', { name: 'Origen de la garantía' });
+  expect(within(cuadro).getByText(/2026101000009/)).toBeInTheDocument();
+  expect(within(cuadro).getByText(/Cambio de embrague/)).toBeInTheDocument();
+  expect(within(cuadro).getByRole('button', { name: 'Editar el origen de la garantía' })).toBeInTheDocument();
+  await waitFor(() => expect(within(d).getByLabelText('Precio unitario')).toBeDisabled());
+  expect(within(d).getByLabelText('Precio unitario')).toHaveValue('0');
+  await userEvent.click(within(d).getByRole('button', { name: /Guardar/ }));
+  await waitFor(() => expect(llamadas.some((l) => l.metodo === 'PATCH' && l.ruta === '/ordenes/o1')).toBe(true));
+  expect(llamadas.find((l) => l.metodo === 'PATCH' && l.ruta === '/ordenes/o1')!.cuerpo).toMatchObject({ tipoAtencion: 'Garantía', garantiaDeId: 'o9', garantiaDetalleIds: ['sv1'] });
+});

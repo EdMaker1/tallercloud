@@ -1,0 +1,339 @@
+import { FormEvent, useCallback, useEffect, useState } from 'react';
+import { api, Local, Me, Rol, UsuarioLista } from '../comun/api';
+import { FilaFiltros, useFiltros } from '../comun/FiltrosColumna';
+import { MenuAcciones } from '../comun/TablaMaestro';
+import { useConfirmar } from '../comun/Confirmar';
+
+const NIVEL: Record<string, string> = { A: 'Todo', E: 'Ver y editar', V: 'Solo ver' };
+
+type Nivel = 'A' | 'E' | 'V';
+
+export default function Usuarios({ me, nivel }: { me: Me; nivel: Nivel }) {
+  const puedeEditar = nivel === 'A' || nivel === 'E';
+  // Los roles los gestiona solo el Superadministrador (o el Desarrollador); el Administrador agrega usuarios, pero no roles.
+  const puedeCrearRoles = nivel === 'A' && (me.esPlataforma || me.roles.includes('Superadministrador'));
+  const [pestana, setPestana] = useState<'usuarios' | 'roles'>('usuarios');
+  const [usuarios, setUsuarios] = useState<UsuarioLista[]>([]);
+  const [roles, setRoles] = useState<Rol[]>([]);
+  const [locales, setLocales] = useState<Local[]>([]);
+  const [mensaje, setMensaje] = useState('');
+  const [error, setError] = useState('');
+
+  const cargar = useCallback(async () => {
+    const [u, r, l] = await Promise.all([api.usuarios(), api.roles(), api.locales()]);
+    setUsuarios(u);
+    setRoles(r);
+    setLocales(l);
+  }, []);
+  useEffect(() => {
+    cargar().catch((e) => setError((e as Error).message));
+  }, [cargar]);
+
+  const nombreLocal = (id?: string | null) => locales.find((l) => l.id === id)?.nombre ?? '—';
+  const alGuardar = async (m: string) => {
+    setError('');
+    setMensaje(m);
+    await cargar();
+  };
+  const alFallar = (m: string) => {
+    setMensaje('');
+    setError(m);
+  };
+  const limpiarError = () => setError('');
+
+  return (
+    <div className="panel ancho">
+      <h1>Usuarios y responsabilidades</h1>
+      <div className="pestanas" role="tablist">
+        <button type="button" className={pestana === 'usuarios' ? 'on' : ''} onClick={() => setPestana('usuarios')}>Usuarios</button>
+        <button type="button" className={pestana === 'roles' ? 'on' : ''} onClick={() => setPestana('roles')}>Roles</button>
+      </div>
+      {mensaje && <p className="ok" role="status">{mensaje}</p>}
+      {pestana === 'usuarios' ? (
+        <ListaUsuarios usuarios={usuarios} roles={roles} locales={locales} nombreLocal={nombreLocal} puedeEditar={puedeEditar} error={error} limpiarError={limpiarError} alGuardar={alGuardar} alFallar={alFallar} />
+      ) : (
+        <PestanaRoles me={me} roles={roles} nivel={nivel} puedeCrear={puedeCrearRoles} error={error} limpiarError={limpiarError} alGuardar={alGuardar} alFallar={alFallar} />
+      )}
+    </div>
+  );
+}
+
+function ListaUsuarios(p: {
+  usuarios: UsuarioLista[];
+  roles: Rol[];
+  locales: Local[];
+  nombreLocal: (id?: string | null) => string;
+  puedeEditar: boolean;
+  error: string;
+  limpiarError: () => void;
+  alGuardar: (m: string) => Promise<void>;
+  alFallar: (m: string) => void;
+}) {
+  const [editando, setEditando] = useState<UsuarioLista | 'nuevo' | null>(null);
+  const [claveDe, setClaveDe] = useState<UsuarioLista | null>(null);
+  const asignables = p.roles.filter((r) => r.asignable);
+  const COLUMNAS = ['Nombre', 'Correo', 'Local', 'Roles', 'Estado'];
+  const { filtros, setFiltros, pasa } = useFiltros<UsuarioLista>([
+    (u) => u.nombre, (u) => u.correo, (u) => p.nombreLocal(u.localId), (u) => u.roles.join(' '), (u) => (u.activo ? 'Activo' : 'Inactivo'),
+  ]);
+  const visibles = p.usuarios.filter(pasa);
+
+  const { preguntar, modal: confirmacion } = useConfirmar();
+  async function cambiarEstado(u: UsuarioLista) {
+    if (u.activo && (await preguntar({ titulo: `¿Eliminar a ${u.nombre}?`, mensaje: 'Si ya registró movimientos no se borra: queda desactivado y se puede activar.' })) === null) return;
+    try {
+      if (!u.activo) { await api.editarUsuario(u.id, { activo: true }); await p.alGuardar('Usuario activado.'); return; }
+      const r = await api.eliminarUsuario(u.id);
+      await p.alGuardar(r.eliminado ? 'Usuario eliminado.' : 'Tenía movimientos: el usuario quedó desactivado.');
+    } catch (e) {
+      p.alFallar((e as Error).message);
+    }
+  }
+
+  return (
+    <>
+      {p.puedeEditar && <div className="fila fin"><button type="button" className="primario chico" onClick={() => setEditando('nuevo')}>+ Nuevo</button></div>}
+      {p.error && !editando && !claveDe && <p className="error" role="alert">{p.error}</p>}
+      {confirmacion}
+      {editando && (
+        <FormUsuario
+          usuario={editando === 'nuevo' ? null : editando}
+          roles={asignables}
+          locales={p.locales}
+          error={p.error}
+          alCancelar={() => { setEditando(null); p.limpiarError(); }}
+          alGuardar={async (m) => {
+            setEditando(null);
+            await p.alGuardar(m);
+          }}
+          alFallar={p.alFallar}
+        />
+      )}
+      {claveDe && <FormClave usuario={claveDe} error={p.error} alCancelar={() => { setClaveDe(null); p.limpiarError(); }} alGuardar={async (m) => { setClaveDe(null); await p.alGuardar(m); }} alFallar={p.alFallar} />}
+      <div className="tabla">
+        <table>
+          <thead>
+            <tr>
+              {p.puedeEditar && <th>Acciones</th>}
+              {COLUMNAS.map((c) => <th key={c}>{c}</th>)}
+            </tr>
+            <FilaFiltros nombres={COLUMNAS} conAcciones={p.puedeEditar} filtros={filtros} setFiltros={setFiltros} />
+          </thead>
+          <tbody>
+            {visibles.map((u) => (
+              <tr key={u.id}>
+                {p.puedeEditar && (
+                  <td className="acc">
+                    <MenuAcciones>
+                      <button type="button" onClick={() => setEditando(u)}>Editar</button>
+                      <button type="button" onClick={() => { p.limpiarError(); setClaveDe(u); }}>Cambiar contraseña</button>
+                      <button type="button" className="peligro" onClick={() => void cambiarEstado(u)}>{u.activo ? 'Eliminar' : 'Activar'}</button>
+                    </MenuAcciones>
+                  </td>
+                )}
+                <td>{u.nombre}</td>
+                <td>{u.correo}</td>
+                <td>{p.nombreLocal(u.localId)}</td>
+                <td>{u.roles.map((r) => <span className="etiqueta" key={r}>{r}</span>)}</td>
+                <td><span className={'pill ' + (u.activo ? 'verde' : 'rojo')}>{u.activo ? 'Activo' : 'Inactivo'}</span></td>
+              </tr>
+            ))}
+            {visibles.length === 0 && <tr><td colSpan={p.puedeEditar ? 6 : 5} className="suave">Sin resultados.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+function FormUsuario(p: {
+  usuario: UsuarioLista | null;
+  roles: Rol[];
+  locales: Local[];
+  error?: string;
+  alCancelar: () => void;
+  alGuardar: (m: string) => Promise<void>;
+  alFallar: (m: string) => void;
+}) {
+  const [nombre, setNombre] = useState(p.usuario?.nombre ?? '');
+  const [correo, setCorreo] = useState(p.usuario?.correo ?? '');
+  const [password, setPassword] = useState('');
+  const [localId, setLocalId] = useState(p.usuario?.localId ?? p.locales[0]?.id ?? '');
+  const [elegidos, setElegidos] = useState<string[]>(() => (p.usuario ? p.roles.filter((r) => p.usuario!.roles.includes(r.nombre)).map((r) => r.id) : []));
+  async function enviar(e: FormEvent) {
+    e.preventDefault();
+    try {
+      if (p.usuario) {
+        await api.editarUsuario(p.usuario.id, { nombre, localId: localId || undefined, rolIds: elegidos, ...(password ? { password } : {}) });
+        await p.alGuardar('Usuario guardado.');
+      } else {
+        await api.crearUsuario({ nombre, correo, password, rolIds: elegidos, localId: localId || undefined });
+        await p.alGuardar('Usuario creado.');
+      }
+    } catch (err) {
+      p.alFallar((err as Error).message);
+    }
+  }
+  const alternar = (id: string) => setElegidos((x) => (x.includes(id) ? x.filter((y) => y !== id) : [...x, id]));
+  const titulo = p.usuario ? 'Editar usuario' : 'Nuevo usuario';
+
+  return (
+    <div className="fondo-modal">
+      <form className="modal-form" role="dialog" aria-modal="true" aria-label={titulo} onSubmit={enviar}>
+        <h2>{titulo}</h2>
+        {p.error && <p className="error" role="alert">{p.error}</p>}
+        <div className="dos-col">
+          <div className="campo"><label htmlFor="u-nombre">Nombre</label>
+            <input id="u-nombre" value={nombre} onChange={(e) => setNombre(e.target.value)} required /></div>
+          <div className="campo"><label htmlFor="u-correo">Correo</label>
+            <input id="u-correo" type="email" value={correo} onChange={(e) => setCorreo(e.target.value)} required disabled={!!p.usuario} /></div>
+          <div className="campo"><label htmlFor="u-clave">{p.usuario ? 'Nueva contraseña (opcional)' : 'Contraseña'}</label>
+            <input id="u-clave" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required={!p.usuario} minLength={p.usuario && !password ? 0 : 8} /></div>
+          <div className="campo"><label htmlFor="u-local">Local</label>
+            <select id="u-local" value={localId} onChange={(e) => setLocalId(e.target.value)}>
+              {p.locales.map((l) => <option key={l.id} value={l.id}>{l.nombre}</option>)}
+            </select></div>
+          <fieldset className="campo ancha roles-col">
+            <legend>Roles</legend>
+            {p.roles.map((r) => (
+              <label key={r.id} className="check">
+                <input type="checkbox" aria-label={r.nombre} checked={elegidos.includes(r.id)} onChange={() => alternar(r.id)} /> {r.nombre}
+              </label>
+            ))}
+          </fieldset>
+        </div>
+        <div className="fila fin">
+          <button type="button" onClick={p.alCancelar}>Cancelar</button>
+          <button type="submit" className="primario chico">Guardar usuario</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function PestanaRoles(p: { me: Me; roles: Rol[]; nivel: Nivel; puedeCrear: boolean; error: string; limpiarError: () => void; alGuardar: (m: string) => Promise<void>; alFallar: (m: string) => void }) {
+  const [creando, setCreando] = useState(false);
+  const [editando, setEditando] = useState<Rol | null>(null);
+  const { preguntar, modal } = useConfirmar();
+  const COLUMNAS = ['Rol', 'Tipo', 'Módulos'];
+  const editable = (r: Rol) => p.puedeCrear && r.ambito !== 'plataforma' && r.nombre !== 'Superadministrador';
+  async function eliminar(r: Rol) {
+    if ((await preguntar({ titulo: '¿Eliminar este rol?', mensaje: `Se eliminará «${r.nombre}». Solo se puede si ningún usuario lo tiene.`, boton: 'Eliminar', peligro: true })) === null) return;
+    try { await api.eliminarRol(r.id); await p.alGuardar('Rol eliminado.'); } catch (e) { p.alFallar((e as Error).message); }
+  }
+  const { filtros, setFiltros, pasa } = useFiltros<Rol>([(r) => r.nombre, (r) => (r.esBase ? 'Base' : 'Propio'), (r) => String(r.permisos.length)]);
+  const visibles = p.roles.filter(pasa);
+
+  return (
+    <>
+      {modal}
+      {p.puedeCrear && <div className="fila fin"><button type="button" className="primario chico" onClick={() => setCreando(true)}>+ Nuevo</button></div>}
+      {p.error && !creando && <p className="error" role="alert">{p.error}</p>}
+      {(creando || editando) && <FormRol rol={editando} me={p.me} nivel={p.nivel} error={p.error} alCancelar={() => { setCreando(false); setEditando(null); p.limpiarError(); }} alGuardar={async (m) => { setCreando(false); setEditando(null); await p.alGuardar(m); }} alFallar={p.alFallar} />}
+      <div className="tabla">
+        <table>
+          <thead>
+            <tr>{p.puedeCrear && <th>Acciones</th>}{COLUMNAS.map((c) => <th key={c}>{c}</th>)}</tr>
+            <FilaFiltros nombres={COLUMNAS} conAcciones={p.puedeCrear} filtros={filtros} setFiltros={setFiltros} />
+          </thead>
+          <tbody>
+            {visibles.map((r) => (
+              <tr key={r.id}>
+                {p.puedeCrear && <td className="acc">{editable(r) && <MenuAcciones><button type="button" onClick={() => { p.limpiarError(); setEditando(r); }}>Editar</button><button type="button" className="peligro" onClick={() => void eliminar(r)}>Eliminar</button></MenuAcciones>}</td>}
+                <td>{r.nombre}</td>
+                <td>{r.esBase ? 'Base' : 'Propio'}</td>
+                <td className="suave">{r.permisos.length ? `${r.permisos.length} módulos` : '—'}</td>
+              </tr>
+            ))}
+            {visibles.length === 0 && <tr><td colSpan={4} className="suave">Sin resultados.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+}
+
+/** «Cambiar contraseña» es una acción más de la fila: pide la nueva contraseña dos veces. */
+function FormClave(p: { usuario: UsuarioLista; error?: string; alCancelar: () => void; alGuardar: (m: string) => Promise<void>; alFallar: (m: string) => void }) {
+  const [clave, setClave] = useState('');
+  const [repetida, setRepetida] = useState('');
+  async function enviar(e: FormEvent) {
+    e.preventDefault();
+    if (clave !== repetida) return p.alFallar('Las dos contraseñas no son iguales.');
+    try {
+      await api.editarUsuario(p.usuario.id, { password: clave });
+      await p.alGuardar('Contraseña cambiada.');
+    } catch (err) {
+      p.alFallar((err as Error).message);
+    }
+  }
+  return (
+    <div className="fondo-modal">
+      <form className="modal-form modal-pagos" role="dialog" aria-modal="true" aria-label={`Cambiar contraseña de ${p.usuario.nombre}`} onSubmit={enviar}>
+        <h2>Cambiar contraseña</h2>
+        {p.error && <p className="error" role="alert">{p.error}</p>}
+        <div className="campo"><label htmlFor="c-nueva">Nueva contraseña *</label>
+          <input id="c-nueva" type="password" value={clave} onChange={(e) => setClave(e.target.value)} required minLength={8} autoFocus /></div>
+        <div className="campo"><label htmlFor="c-repetida">Repetir contraseña *</label>
+          <input id="c-repetida" type="password" value={repetida} onChange={(e) => setRepetida(e.target.value)} required minLength={8} /></div>
+        <div className="fila fin">
+          <button type="button" onClick={p.alCancelar}>Cancelar</button>
+          <button type="submit" className="primario chico">Guardar</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+function FormRol(p: { rol?: Rol | null; me: Me; nivel: Nivel; error?: string; alCancelar: () => void; alGuardar: (m: string) => Promise<void>; alFallar: (m: string) => void }) {
+  const [nombre, setNombre] = useState(p.rol?.nombre ?? '');
+  const [elegidos, setElegidos] = useState<Record<string, Nivel>>(() => Object.fromEntries((p.rol?.permisos ?? []).map((x) => [x.modulo, x.nivel])));
+  // Solo se pueden elegir módulos que tú tienes, hasta tu mismo nivel.
+  const modulos = p.me.menu.filter((m) => m.id !== 'usuarios' || p.nivel === 'A');
+  const opciones = (max: Nivel): Nivel[] => (max === 'A' ? ['V', 'E', 'A'] : max === 'E' ? ['V', 'E'] : ['V']);
+
+  async function enviar(e: FormEvent) {
+    e.preventDefault();
+    const permisos = modulos.filter((m) => elegidos[m.id]).map((m) => ({ modulo: m.id, nivel: elegidos[m.id] }));
+    try {
+      if (p.rol) await api.editarRol(p.rol.id, { nombre, permisos });
+      else await api.crearRol({ nombre, permisos });
+      await p.alGuardar('Rol guardado.');
+    } catch (err) {
+      p.alFallar((err as Error).message);
+    }
+  }
+
+  return (
+    <div className="fondo-modal">
+      <form className="modal-form" role="dialog" aria-modal="true" aria-label={p.rol ? 'Editar rol' : 'Nuevo rol propio'} onSubmit={enviar}>
+        <h2>{p.rol ? 'Editar rol' : 'Nuevo rol propio'}</h2>
+        {p.error && <p className="error" role="alert">{p.error}</p>}
+        <div className="dos-col">
+          <div className="campo ancha"><label htmlFor="r-nombre">Nombre del rol</label>
+            <input id="r-nombre" value={nombre} onChange={(e) => setNombre(e.target.value)} required /></div>
+          {modulos.map((m) => (
+            <div key={m.id} className="campo modulo">
+              <label className="check">
+                <input
+                  type="checkbox"
+                  aria-label={m.label}
+                  checked={!!elegidos[m.id]}
+                  onChange={(e) => setElegidos((x) => { const n = { ...x }; if (e.target.checked) n[m.id] = 'V'; else delete n[m.id]; return n; })}
+                />{' '}
+                {m.label}
+              </label>
+              <select aria-label={`Nivel de ${m.label}`} disabled={!elegidos[m.id]} value={elegidos[m.id] ?? 'V'} onChange={(e) => setElegidos((x) => ({ ...x, [m.id]: e.target.value as Nivel }))}>
+                {opciones(m.nivel).map((n) => <option key={n} value={n}>{NIVEL[n]}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+        <div className="fila fin">
+          <button type="button" onClick={p.alCancelar}>Cancelar</button>
+          <button type="submit" className="primario chico">Guardar rol</button>
+        </div>
+      </form>
+    </div>
+  );
+}

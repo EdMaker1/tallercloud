@@ -1,0 +1,53 @@
+# Blueprint de Render: API (NestJS) + pantalla (React estática). La base de datos va en Neon (PostgreSQL gratuito).
+# Uso: Render > New > Blueprint > elegir el repositorio. Render lee este archivo y crea los dos servicios.
+# Las variables marcadas con sync: false se llenan a mano en el panel de Render (nunca en el repositorio).
+services:
+  - type: web
+    name: tallercloud-api
+    runtime: node
+    plan: free
+    region: virginia
+    autoDeployTrigger: checksPass   # despliega solo si el CI de GitHub Actions pasó
+    buildCommand: bash despliegue/render-build-api.sh
+    startCommand: node apps/api/dist/src/main.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: DATABASE_URL          # cadena DIRECTA de Neon (sin "-pooler"), con ?sslmode=require
+        sync: false
+      - key: JWT_SECRET            # Render genera un valor aleatorio
+        generateValue: true
+      - key: CORS_ORIGIN           # URL de la pantalla, p. ej. https://tallercloud-web.onrender.com
+        sync: false
+      - key: CONSULTA_DOC_TOKEN    # opcional: token de apis.net.pe para DNI/RUC
+        sync: false
+
+  - type: web
+    name: tallercloud-web
+    runtime: static
+    region: virginia
+    autoDeployTrigger: checksPass
+    buildCommand: bash despliegue/render-build-web.sh
+    staticPublishPath: apps/web/dist
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: VITE_API_URL          # URL de la API, p. ej. https://tallercloud-api.onrender.com
+        sync: false
+      - key: VITE_DEMO_MODE        # en la nube nunca se muestra la clave de demostración
+        value: "false"
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
