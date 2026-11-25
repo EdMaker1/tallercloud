@@ -25,7 +25,7 @@ services:
 
   - type: web
     name: tallercloud-web
-    runtime: static
+    ##runtime: static
     region: virginia
     autoDeployTrigger: checksPass
     buildCommand: bash despliegue/render-build-web.sh
